@@ -51,6 +51,11 @@ struct Opt {
     num_vars: usize,
 }
 
+fn barrier() {
+    Net::send_to_master(&0u8);
+    Net::recv_from_master_uniform::<u8>(if Net::am_master() { Some(0u8) } else { None });
+}
+
 fn main() {
     let thread = rayon::current_num_threads();
     let opt = Opt::from_args();
@@ -359,17 +364,25 @@ where
         });
 
         //==========================================================
-        // generate a proof
-        let stats_a = Net::stats();
+        // generate a proof (warmup and stats collection)
+        barrier();
+        Net::reset_stats();
         let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, PCS>>::d_prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
             &(),
         )?;
-        let stats_b = Net::stats();
-        print_stats(&stats_a, &stats_b);
+        let stats_after_warmup = Net::stats();
+        print_stats(&Stats::default(), &stats_after_warmup);
+        // Machine-readable output for communication
+        if Net::am_master() {
+            let total_comm_mb = (stats_after_warmup.bytes_sent + stats_after_warmup.bytes_recv) as f64 / 1024.0 / 1024.0;
+            println!("COMM_TOTAL_MB: {:.2}", total_comm_mb);
+        }
 
+        // Timed benchmark
+        barrier();
         let start = Instant::now();
         for _ in 0..repetition {
             let _proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, PCS>>::d_prove(
@@ -379,15 +392,25 @@ where
                 &(),
             )?;
         }
+        let prove_time_us = start.elapsed().as_micros() / repetition as u128;
         println!(
             "proving for {} variables: {} us",
             nv,
-            start.elapsed().as_micros() / repetition as u128
+            prove_time_us
         );
+        // Machine-readable output for prover time (commit + open combined)
+        if Net::am_master() {
+            println!("PROVER_TIME_MS: {:.3}", prove_time_us as f64 / 1000.0);
+        }
 
         let mut bytes = Vec::with_capacity(CanonicalSerialize::compressed_size(&proof));
         CanonicalSerialize::serialize_compressed(&proof, &mut bytes).unwrap();
+        let proof_size_kb = bytes.len() as f64 / 1024.0;
         println!("proof size for {} variables compressed: {} bytes", nv, bytes.len());
+        // Machine-readable output for proof size
+        if Net::am_master() {
+            println!("PROOF_SIZE_KB: {:.2}", proof_size_kb);
+        }
 
         let mut bytes = Vec::with_capacity(CanonicalSerialize::uncompressed_size(&proof));
         CanonicalSerialize::serialize_uncompressed(&proof, &mut bytes).unwrap();
@@ -407,11 +430,14 @@ where
                     <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, PCS>>::verify(&vk, &pi, &proof)?;
                 assert!(verify);
             }
+            let verify_time_us = start.elapsed().as_micros() / (repetition * 5) as u128;
             println!(
                 "verifying for {} variables: {} us",
                 nv,
-                start.elapsed().as_micros() / (repetition * 5) as u128
+                verify_time_us
             );
+            // Machine-readable output
+            println!("VERIFY_TIME_MS: {:.3}", verify_time_us as f64 / 1000.0);
         }
         Ok(())
     }
