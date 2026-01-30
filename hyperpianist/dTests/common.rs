@@ -8,29 +8,45 @@ use structopt::StructOpt;
 use rand::{rngs::StdRng, SeedableRng};
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "example", about = "An example of StructOpt usage.")]
-struct Opt {
-    /// Id
-    id: usize,
+#[structopt(name = "distributed_pcs_bench", about = "Distributed PCS benchmark")]
+pub struct Opt {
+    /// Party ID (0 = master)
+    pub id: usize,
 
-    /// Input file
+    /// Network config file path
     #[structopt(parse(from_os_str))]
-    input: PathBuf,
+    pub input: PathBuf,
+
+    /// Number of polynomial variables (mu)
+    #[structopt(default_value = "20")]
+    pub mu: usize,
+
+    /// Number of iterations
+    #[structopt(short, long, default_value = "1")]
+    pub iterations: usize,
 }
 
-pub(super) fn network_run<F>(func: F)
+pub fn network_run<F>(func: F)
 where
-    F: FnOnce() -> (),
+    F: FnOnce(Opt) -> (),
 {
+    // Disable rayon multi-threading for fair single-thread benchmarking
+    std::env::set_var("RAYON_NUM_THREADS", "1");
+
     let opt = Opt::from_args();
     Net::init_from_file(opt.input.to_str().unwrap(), opt.id);
 
-    func();
+    func(opt);
 
     Net::deinit();
 }
 
-pub(super) fn d_evaluate<F: PrimeField>(
+pub fn barrier() {
+    Net::send_to_master(&0u8);
+    Net::recv_from_master_uniform::<u8>(if Net::am_master() { Some(0u8) } else { None });
+}
+
+pub fn d_evaluate<F: PrimeField>(
     poly: &VirtualPolynomial<F>,
     point: Option<&[F]>,
 ) -> Option<F> {
@@ -46,7 +62,7 @@ pub(super) fn d_evaluate<F: PrimeField>(
 
         let evals = Net::send_to_master(&evals).unwrap();
         let mle_evals = (0..evals[0].len())
-            .map(|mle_index| 
+            .map(|mle_index|
                 DenseMultilinearExtension::from_evaluations_vec(num_party_vars, evals.iter().map(
                     |party_evals| party_evals[mle_index]
                 ).collect())
@@ -70,20 +86,20 @@ pub(super) fn d_evaluate<F: PrimeField>(
     }
 }
 
-pub(super) fn d_evaluate_mle<F: PrimeField>(
+pub fn d_evaluate_mle<F: PrimeField>(
     poly: &Arc<DenseMultilinearExtension<F>>,
     point: Option<&[F]>,
 ) -> Option<F> {
     d_evaluate(&VirtualPolynomial::new_from_mle(poly, F::one()), point)
 }
 
-pub(super) fn test_rng() -> StdRng {
+pub fn test_rng() -> StdRng {
     let mut seed = [0u8; 32];
     seed[0] = Net::party_id() as u8;
     rand::rngs::StdRng::from_seed(seed)
 }
 
-pub(super) fn test_rng_deterministic() -> StdRng {
+pub fn test_rng_deterministic() -> StdRng {
     let seed = [69u8; 32];
     rand::rngs::StdRng::from_seed(seed)
 }

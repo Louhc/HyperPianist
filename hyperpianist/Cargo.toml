@@ -41,6 +41,14 @@ path = "dTests/bench.rs"
 name = "e2e"
 path = "dTests/e2e.rs"
 
+[[example]]
+name = "deMkzg_bench"
+path = "dTests/deMkzg_bench.rs"
+
+[[example]]
+name = "deDory_bench"
+path = "dTests/deDory_bench.rs"
+
 [features]
 # default = [ ]
 # default = [ "parallel" ]

@@ -33,22 +33,29 @@ const MAX_CUSTOM_DEGREE: usize = 32;
 const HIGH_DEGREE_TEST_NV: usize = 15;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "example", about = "An example of StructOpt usage.")]
+#[structopt(name = "hyperpianist-bench", about = "Distributed HyperPianist SNARK benchmark")]
 struct Opt {
-    /// Id
+    /// Party ID (0 = master)
     id: usize,
 
-    /// Input file
+    /// Network config file path
     #[structopt(parse(from_os_str))]
     input: PathBuf,
 
+    /// Use Dory PCS instead of mKZG
     #[structopt(long)]
     dory: bool,
 
+    /// Use Jellyfish gate instead of Vanilla Plonk
     #[structopt(long)]
     jellyfish: bool,
 
+    /// Number of polynomial variables (mu)
     num_vars: usize,
+
+    /// Number of iterations
+    #[structopt(short, long, default_value = "1")]
+    iterations: usize,
 }
 
 fn barrier() {
@@ -57,9 +64,13 @@ fn barrier() {
 }
 
 fn main() {
-    let thread = rayon::current_num_threads();
+    // Disable rayon multi-threading for fair single-thread benchmarking
+    std::env::set_var("RAYON_NUM_THREADS", "1");
+
     let opt = Opt::from_args();
     Net::init_from_file(opt.input.to_str().unwrap(), opt.id);
+
+    let iterations = opt.iterations;
 
     let dedory_pcs_srs = {
         match read_dedory_srs() {
@@ -95,15 +106,15 @@ fn main() {
 
     if opt.dory {
         if opt.jellyfish {
-            Helper::<DeDory<Bn254>>::bench_jellyfish_plonk(&dedory_pcs_srs, thread, opt.num_vars).unwrap();
+            Helper::<DeDory<Bn254>>::bench_jellyfish_plonk(&dedory_pcs_srs, opt.num_vars, iterations).unwrap();
         } else {
-            Helper::<DeDory<Bn254>>::bench_vanilla_plonk(&dedory_pcs_srs, thread, opt.num_vars).unwrap();
+            Helper::<DeDory<Bn254>>::bench_vanilla_plonk(&dedory_pcs_srs, opt.num_vars, iterations).unwrap();
         }
     } else {
         if opt.jellyfish {
-            Helper::<DeMkzg<Bn254>>::bench_jellyfish_plonk(&deMkzg_pcs_srs, thread, opt.num_vars).unwrap();
+            Helper::<DeMkzg<Bn254>>::bench_jellyfish_plonk(&deMkzg_pcs_srs, opt.num_vars, iterations).unwrap();
         } else {
-            Helper::<DeMkzg<Bn254>>::bench_vanilla_plonk(&deMkzg_pcs_srs, thread, opt.num_vars).unwrap();
+            Helper::<DeMkzg<Bn254>>::bench_vanilla_plonk(&deMkzg_pcs_srs, opt.num_vars, iterations).unwrap();
         }
     }
     // bench_jellyfish_plonk(&pcs_srs, thread).unwrap();
@@ -287,22 +298,22 @@ where
 
     fn bench_vanilla_plonk(
         pcs_srs: &PCS::SRS,
-        thread: usize,
         nv: usize,
+        iterations: usize,
     ) -> Result<(), HyperPlonkErrors> {
         let vanilla_gate = CustomizedGates::vanilla_plonk_gate();
-        Self::bench_mock_circuit_zkp_helper(nv, &vanilla_gate, pcs_srs)?;
+        Self::bench_mock_circuit_zkp_helper(nv, &vanilla_gate, pcs_srs, iterations)?;
 
         Ok(())
     }
 
     fn bench_jellyfish_plonk(
         pcs_srs: &PCS::SRS,
-        thread: usize,
         nv: usize,
+        iterations: usize,
     ) -> Result<(), HyperPlonkErrors> {
         let jf_gate = CustomizedGates::jellyfish_turbo_plonk_gate();
-        Self::bench_mock_circuit_zkp_helper(nv, &jf_gate, pcs_srs)?;
+        Self::bench_mock_circuit_zkp_helper(nv, &jf_gate, pcs_srs, iterations)?;
 
         Ok(())
     }
@@ -310,13 +321,14 @@ where
     fn bench_high_degree_plonk(
         pcs_srs: &PCS::SRS,
         degree: usize,
-        thread: usize,
+        iterations: usize,
     ) -> Result<(), HyperPlonkErrors> {
         let vanilla_gate = CustomizedGates::mock_gate(2, degree);
         Self::bench_mock_circuit_zkp_helper(
             HIGH_DEGREE_TEST_NV,
             &vanilla_gate,
             pcs_srs,
+            iterations,
         )?;
 
         Ok(())
@@ -326,15 +338,10 @@ where
         nv: usize,
         gate: &CustomizedGates,
         pcs_srs: &PCS::SRS,
+        iterations: usize,
     ) -> Result<(), HyperPlonkErrors> {
         let nv = nv - Net::n_parties().log_2();
-        let repetition = if nv <= 20 {
-            20
-        } else if nv <= 22 {
-            10
-        } else {
-            5
-        };
+        let repetition = iterations;
 
         let mut rng = test_rng();
         //==========================================================
