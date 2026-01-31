@@ -60,7 +60,9 @@ fn bench_dory_pcs(
     let mut open_times = Vec::with_capacity(iterations);
     let mut verify_times = Vec::with_capacity(iterations);
     let mut proof_size = 0usize;
-    let mut total_comm_bytes = 0u64;
+
+    // Reset stats before iterations to capture all communication
+    Net::reset_stats();
 
     for iter in 0..iterations {
         master_print!("\n--- Iteration {} ---", iter + 1);
@@ -78,7 +80,6 @@ fn bench_dory_pcs(
 
         // Commit
         barrier();
-        Net::reset_stats();
         let start = Instant::now();
         let (com, advice) = DeDory::d_commit(&ck, &poly)?;
         let commit_time = start.elapsed();
@@ -86,13 +87,10 @@ fn bench_dory_pcs(
 
         // Open
         barrier();
-        let stats_after_commit = Net::stats();
-        Net::reset_stats();
         let start = Instant::now();
         let proof = DeDory::open(&ck, &poly, &advice, &point)?;
         let open_time = start.elapsed();
         open_times.push(open_time);
-        let stats_after_open = Net::stats();
 
         // Verify (master only)
         if is_master {
@@ -105,14 +103,11 @@ fn bench_dory_pcs(
             verify_times.push(verify_time);
             assert!(result, "Verification failed at iteration {}", iter + 1);
 
-            // Record sizes (last iteration)
+            // Record proof size (last iteration)
             if iter == iterations - 1 {
                 let mut proof_bytes = Vec::new();
                 proof.serialize_compressed(&mut proof_bytes).unwrap();
                 proof_size = proof_bytes.len();
-
-                total_comm_bytes = (stats_after_commit.bytes_sent + stats_after_commit.bytes_recv
-                    + stats_after_open.bytes_sent + stats_after_open.bytes_recv) as u64;
             }
 
             master_print!("Commit: {:?}, Open: {:?}, Verify: {:?}",
@@ -128,13 +123,17 @@ fn bench_dory_pcs(
         }
     }
 
+    // Get average communication stats per iteration (master's sent + received)
+    let stats = Net::stats();
+    let total_comm_bytes = (stats.bytes_sent + stats.bytes_recv) as f64;
+
     // Print summary (master only)
     if is_master {
         let avg = |times: &[Duration]| -> Duration {
             times.iter().sum::<Duration>() / times.len() as u32
         };
 
-        let total_comm_mb = total_comm_bytes as f64 / (1024.0 * 1024.0);
+        let avg_comm_mb = total_comm_bytes / iterations as f64 / (1024.0 * 1024.0);
 
         master_print!("\n========================================");
         master_print!("Summary ({} iterations):", iterations);
@@ -142,7 +141,7 @@ fn bench_dory_pcs(
         master_print!("  Open (avg):   {:?}", avg(&open_times));
         master_print!("  Verify (avg): {:?}", avg(&verify_times));
         master_print!("  Proof size:   {:.2} KB", proof_size as f64 / 1024.0);
-        master_print!("  Communication: {:.2} MB", total_comm_mb);
+        master_print!("  Communication: {:.2} MB", avg_comm_mb);
         master_print!("========================================");
 
         // Machine-readable output
@@ -150,7 +149,7 @@ fn bench_dory_pcs(
         println!("OPEN_TIME_MS: {:.3}", avg(&open_times).as_secs_f64() * 1000.0);
         println!("VERIFY_TIME_MS: {:.3}", avg(&verify_times).as_secs_f64() * 1000.0);
         println!("PROOF_SIZE_KB: {:.2}", proof_size as f64 / 1024.0);
-        println!("COMM_TOTAL_MB: {:.2}", total_comm_mb);
+        println!("COMM_TOTAL_BYTES: {}", (total_comm_bytes / iterations as f64) as u64);
 
         // Combined prover time
         let prover_ms = avg(&commit_times).as_secs_f64() * 1000.0
