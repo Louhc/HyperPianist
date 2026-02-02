@@ -27,7 +27,6 @@ use common::{d_evaluate_mle, test_rng, test_rng_deterministic};
 
 const SUPPORTED_SIZE: usize = 16;
 const MIN_NUM_VARS: usize = 22;
-const MAX_NUM_VARS: usize = 26;
 const MIN_CUSTOM_DEGREE: usize = 1;
 const MAX_CUSTOM_DEGREE: usize = 32;
 const HIGH_DEGREE_TEST_NV: usize = 15;
@@ -72,45 +71,45 @@ fn main() {
 
     let iterations = opt.iterations;
 
-    let dedory_pcs_srs = {
-        match read_dedory_srs() {
-            Ok(p) => p,
-            Err(_e) => {
-                let mut srs_rng = test_rng_deterministic();
-                let srs = DeDory::<Bn254>::gen_srs_for_testing(&mut srs_rng, SUPPORTED_SIZE).unwrap();
-                let pp = match srs {
-                    DeDorySRS::Unprocessed(pp) => pp,
-                    _ => panic!("Unexpected processed"),
-                };
-                write_dedory_srs(&pp);
-
-                let (prover, verifier) =
-                    DeDory::trim(&DeDorySRS::Unprocessed(pp), None, None).unwrap();
-                DeDorySRS::Processed((prover, verifier))
-            },
-        }
-    };
-
-    let deMkzg_pcs_srs = {
-        match read_deMkzg_srs() {
-            Ok(p) => p,
-            Err(_e) => {
-                let mut srs_rng = test_rng_deterministic();
-                let srs = DeMkzg::<Bn254>::gen_srs_for_testing(&mut srs_rng, MAX_NUM_VARS).unwrap();
-                let (prover, verifier) = DeMkzg::trim(&srs, None, Some(MAX_NUM_VARS)).unwrap();
-                write_deMkzg_srs(&prover, &verifier);
-                DeMkzgSRS::Processed((prover, verifier))
-            },
-        }
-    };
-
     if opt.dory {
+        let dedory_pcs_srs = {
+            match read_dedory_srs() {
+                Ok(p) => p,
+                Err(_e) => {
+                    let mut srs_rng = test_rng_deterministic();
+                    let srs = DeDory::<Bn254>::gen_srs_for_testing(&mut srs_rng, SUPPORTED_SIZE).unwrap();
+                    let pp = match srs {
+                        DeDorySRS::Unprocessed(pp) => pp,
+                        _ => panic!("Unexpected processed"),
+                    };
+                    write_dedory_srs(&pp);
+
+                    let (prover, verifier) =
+                        DeDory::trim(&DeDorySRS::Unprocessed(pp), None, None).unwrap();
+                    DeDorySRS::Processed((prover, verifier))
+                },
+            }
+        };
         if opt.jellyfish {
             Helper::<DeDory<Bn254>>::bench_jellyfish_plonk(&dedory_pcs_srs, opt.num_vars, iterations).unwrap();
         } else {
             Helper::<DeDory<Bn254>>::bench_vanilla_plonk(&dedory_pcs_srs, opt.num_vars, iterations).unwrap();
         }
     } else {
+        // SRS needs to support total num_vars for SNARK preprocessing
+        let srs_size = opt.num_vars;
+        let deMkzg_pcs_srs = {
+            match read_deMkzg_srs(srs_size) {
+                Ok(p) => p,
+                Err(_e) => {
+                    let mut srs_rng = test_rng_deterministic();
+                    let srs = DeMkzg::<Bn254>::gen_srs_for_testing(&mut srs_rng, srs_size).unwrap();
+                    let (prover, verifier) = DeMkzg::trim(&srs, None, Some(srs_size)).unwrap();
+                    write_deMkzg_srs(&prover, &verifier, srs_size).ok();
+                    DeMkzgSRS::Processed((prover, verifier))
+                },
+            }
+        };
         if opt.jellyfish {
             Helper::<DeMkzg<Bn254>>::bench_jellyfish_plonk(&deMkzg_pcs_srs, opt.num_vars, iterations).unwrap();
         } else {
@@ -154,16 +153,16 @@ fn write_dedory_srs(pp: &PublicParameters<Bn254>) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-fn read_deMkzg_srs() -> Result<DeMkzgSRS<Bn254>, Box<dyn Error>> {
+fn read_deMkzg_srs(srs_size: usize) -> Result<DeMkzgSRS<Bn254>, Box<dyn Error>> {
     let sub_prover_setup_filepath = format!(
         "deMkzg-SubProver{}-max{}.paras",
         Net::party_id(),
-        MAX_NUM_VARS
+        srs_size
     );
     let verifier_setup_filepath = format!(
         "deMkzg-Verifier{}-max{}.paras",
         Net::party_id(),
-        MAX_NUM_VARS
+        srs_size
     );
     let prover_setup = {
         let file = std::fs::File::open(sub_prover_setup_filepath)?;
@@ -180,16 +179,17 @@ fn read_deMkzg_srs() -> Result<DeMkzgSRS<Bn254>, Box<dyn Error>> {
 fn write_deMkzg_srs(
     prover: &MultilinearProverParam<Bn254>,
     verifier: &MultilinearVerifierParam<Bn254>,
+    srs_size: usize,
 ) -> Result<(), Box<dyn Error>> {
     let sub_prover_setup_filepath = format!(
         "deMkzg-SubProver{}-max{}.paras",
         Net::party_id(),
-        MAX_NUM_VARS
+        srs_size
     );
     let verifier_setup_filepath = format!(
         "deMkzg-Verifier{}-max{}.paras",
         Net::party_id(),
-        MAX_NUM_VARS
+        srs_size
     );
 
     let file = std::fs::File::create(sub_prover_setup_filepath)?;
@@ -224,10 +224,11 @@ where
         BatchProof = BatchProof<Bn254, PCS>,
     >,
 {
+    /*
     fn bench_pcs(pcs_srs: &PCS::SRS) -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
-        let (ck, vk) = PCS::trim(pcs_srs, None, Some(MAX_NUM_VARS))?;
-        for nv in MIN_NUM_VARS..=MAX_NUM_VARS {
+        let (ck, vk) = PCS::trim(pcs_srs, None, Some(26))?;
+        for nv in MIN_NUM_VARS..=26 {
             let nv = nv - Net::n_parties().log_2();
             let repetition = 5;
 
@@ -295,6 +296,7 @@ where
 
         Ok(())
     }
+    */
 
     fn bench_vanilla_plonk(
         pcs_srs: &PCS::SRS,
@@ -384,22 +386,31 @@ where
         print_stats(&Stats::default(), &stats_after_warmup);
         // Machine-readable output for communication
         if Net::am_master() {
-            let total_comm_mb = (stats_after_warmup.bytes_sent + stats_after_warmup.bytes_recv) as f64 / 1024.0 / 1024.0;
-            println!("COMM_TOTAL_MB: {:.2}", total_comm_mb);
+            let total_comm_bytes = stats_after_warmup.bytes_sent + stats_after_warmup.bytes_recv;
+            println!("COMM_TOTAL_BYTES: {}", total_comm_bytes);
         }
 
-        // Timed benchmark
-        barrier();
-        let start = Instant::now();
-        for _ in 0..repetition {
+        // Timed benchmark - per iteration
+        let mut prove_times_us = Vec::with_capacity(repetition);
+        for iter in 0..repetition {
+            barrier();
+            let start = Instant::now();
             let _proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, PCS>>::d_prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
                 &(),
             )?;
+            let elapsed_us = start.elapsed().as_micros();
+            prove_times_us.push(elapsed_us);
+
+            // Machine-readable per-iteration output
+            if Net::am_master() {
+                println!("ITER_{}_PROVE_MS: {:.3}", iter + 1, elapsed_us as f64 / 1000.0);
+            }
         }
-        let prove_time_us = start.elapsed().as_micros() / repetition as u128;
+
+        let prove_time_us = prove_times_us.iter().sum::<u128>() / repetition as u128;
         println!(
             "proving for {} variables: {} us",
             nv,
